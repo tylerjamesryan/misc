@@ -1,0 +1,458 @@
+---
+title: "Cheating Behavior"
+author: "Tyler J. Ryan"
+date: "3/4/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+If using verbal ability (i.e. not looking up the answers on Google), person $p$ responding to item $i$ has some probability $\pi_{[p,i]}$ of getting it correct. This is bernoulli distributed, like tossing a coin.
+
+
+\begin{aligned}
+  y_{[p,i]} \sim & \text{Bernoulli}(\pi_{[p,i]}) \\
+  \\
+\end{aligned}
+
+The probability of that person getting the item correct is a function of their ability $\theta_{[p]}$ to solve the problem (maybe it's verbal ability) and the difficulty $\delta_{[i]}$ of the problem. A common way to model this is to take the difference between the two and normalize it so it ranges between zero and one. A common function (there are others) to normalize a continuous variable is the inverse-logit function,
+
+\begin{aligned}
+  \pi_{[p,i]} = & \frac{1}{1+e^{-(\theta_{[p]} - \delta_{[i]})}} \\
+  \\
+\end{aligned}
+
+We can then put priors on the person ability and item difficulty parameters,  
+
+\begin{aligned}
+  y_{[p,i]} \sim & \text{Bernoulli}(\pi_{[p,i]}) \\
+  \\
+  \pi_{[p,i]} = & \frac{1}{1+e^{-(\theta_{[p]} - \delta_{[i]})}} \\
+    \\
+  \theta_{[p]} \sim & \text{Normal}(0, 1) \\
+  \\
+  \delta_{[i]} \sim & \text{Normal}(0, 1) \\
+\end{aligned}
+  
+
+If we want to account for the possibility that people are using another strategy, in this case they are cheating, a person can get the item correct by either using their verbal ability or by cheating. So there are two ways to get an item correct. The probability of observing a correct response is the probability that they are cheating $\pi_{C}$ plus the probability that they are honest and are using their ability to solve the problem $\pi_{H[p,i]}$.
+
+\begin{aligned}
+  y_{[p,i]} \sim & \text{Bernoulli}(\pi_{H[p,i]} + \pi_{C}) \\
+\end{aligned}
+  
+We can break down the probability of getting an item correct when responding honestly as the probability of not cheating multiplied by the probability of getting the item correct when using one's verbal ability.
+  
+\begin{aligned}
+  \\
+  \pi_{H[p,i]} = & \left (1 -\pi_{C} \right) \times \frac{1}{1+e^{-(\theta_{[p]} - \delta_{[i]})}} \\
+\end{aligned}
+
+
+
+\begin{aligned}
+  \\
+  \pi_{C} \sim & \text{Beta}(1, 1) \\
+  \\
+  \theta_{[p]} \sim & \text{Normal}(0, 1) \\
+  \\
+  \delta_{[i]} \sim & \text{Normal}(0, 1) \\
+  
+\end{aligned}
+
+I put a Beta distribution prior on the cheating probability. The Beta distribution produces values between zero and one. Right now $\pi_{C}$ is the same of all persons answering all items, but maybe we have reason to believe that it is different. If we had some external information, or a predictor (maybe response times), we could use that in place of this Beta prior. This model also assumes that if someone cheats, they have a 100% chance of answering the problem correctly. 
+
+Let's say we have some prior belief/knowledge about how difficult an item is. That might come in the form of previous studies showing percentage of respondents getting an item correct. We could give the prior on $\delta_{[i]}$ a more informative mean. Say a given item was answered correctly by roughly $p_{[i]} = 3/5$ of the participants in a previous study. In the model above, the item difficulty is on the logit scale. To covert a percentage to the logit scale, we could use the logit function, or the log of the odds,
+
+\begin{aligned}
+  z_{[i]} = & \log \left ( \frac{p_{[i]}}{1-p_{[i]}} \right ).
+\end{aligned}
+
+Now that our belief is on the logit scale, we can plug that into the mean for the $\delta_{[i]}$ prior,
+
+\begin{aligned}
+  \delta_{[i]} \sim & \text{Normal}(z_{[i]}, 1) \\
+\end{aligned}
+
+
+Let's simulate this in R.
+
+```{r}
+inverse_logit <- function(z) {
+  1 / (1 + exp(-z))
+}
+
+n_participants <- 1000
+n_items <- 20
+
+# generate parameters
+alpha <- rnorm(1, 0, 1)
+tau <- rexp(1, 1)
+theta <- rnorm(n = n_participants, mean = 0, sd = 1)
+delta <- rnorm(n = n_items, mean = 0, sd = 1)
+pi_C <- rbeta(n = 1, shape1 = 1, shape2 = 9) # 1 / (1 + 9) = ~10% cheating
+
+# create containers for honest correct responding probability and observed
+# responses
+pi_H <- matrix(
+  data = NA, 
+  nrow = n_participants, 
+  ncol = n_items
+)
+
+y <- matrix(
+  data = NA, 
+  nrow = n_participants, 
+  ncol = n_items,
+  dimnames = list(
+    participant = 1:n_participants,
+    item = 1:n_items)
+)
+
+# iterate through each person answering each item, calculate the probability of
+# correct honest responding and generate an observed response
+for (p in 1:n_participants) {
+  for (i in 1:n_items) {
+    pi_H[p,i] <- (1 - pi_C) * inverse_logit(alpha + theta[p] * tau - delta[i])
+    y[p,i] <- rbinom(n = 1, size = 1, prob = pi_H[p,i] + pi_C)
+  }
+}
+
+# convert y to long format
+y_long <- reshape2::melt(y, value.name = "response")
+
+```
+
+
+We can then estimate this model to see if we can recover the parameters. Quadratic approximation will likely perform poorly, so we're going to use the `ulam` function, which estimates parameters via MCMC.
+
+```{r message=FALSE, cache=TRUE, include=FALSE}
+library(rethinking)
+
+flist_1 <- alist(
+  response ~ dbern(pi_H + pi_C),
+  pi_H <- (1 - pi_C) * inv_logit(alpha + theta[participant]*tau - delta[item]),
+  pi_C ~ dbeta(1, 9),
+  alpha ~ dnorm(0, 1),
+  tau ~ dexp(1),
+  theta[participant] ~ dnorm(0, 1),
+  delta[item] ~ dnorm(0, 1)
+)
+
+fit_1 <- ulam(
+  flist_1 = flist_1,
+  data = as.list(y_long), 
+  chains = 2, 
+  cmdstan = T,
+  threads = 2,
+  cores = 4,
+  messages = FALSE
+)  
+  
+```
+
+
+```{r}
+post_1 <- extract.samples(fit_1)
+```
+
+```{r}
+with(post_1, dens(pi_C, show.HPDI = T))
+abline(v = pi_C, lty = 2)
+
+with(post_1, dens(alpha, show.HPDI = T))
+abline(v = alpha, lty = 2)
+
+with(post_1, dens(tau, show.HPDI = T))
+abline(v = tau, lty = 2)
+```
+
+```{r}
+
+theta_mu <- apply(post_1$theta, 2, mean)
+theta_ci <- t(apply(post_1$theta, 2, PI))
+n_th <- 100
+idx <- sample(1:n_participants, n_th)
+idx <- idx[order(theta[idx])]
+plot(
+  x = theta[idx], y = theta[idx],
+  ylab = bquote(~theta),
+  xlab = "",
+  pch = 16,
+  ylim = c(-3, 3),
+  frame.plot = F,
+  xaxt = "n"
+)
+points(
+  x = theta[idx], y = theta_mu[idx]
+)
+segments(
+  x0 = theta[idx], x1 = theta[idx],
+  y0 = theta_ci[idx, 1],
+  y1 = theta_ci[idx, 2],
+  lwd = .4
+)
+```
+
+
+```{r}
+delta_mu <- apply(post_1$delta, 2, mean)
+delta_ci <- t(apply(post_1$delta, 2, PI))
+n_b <- 20
+idx <- sample(1:n_items, n_b)
+idx <- idx[order(delta[idx])]
+plot(
+  x = delta[idx], y = delta[idx],
+  ylab = bquote(~delta),
+  xlab = "",
+  pch = 16,
+  ylim = c(-3, 3),
+  frame.plot = F,
+  xaxt = "n"
+)
+points(
+  x = delta[idx], y = delta_mu[idx]
+)
+segments(
+  x0 = delta[idx], x1 = delta[idx],
+  y0 = delta_ci[idx, 1],
+  y1 = delta_ci[idx, 2],
+  lwd = .4
+)
+```
+
+
+
+
+```{r}
+inverse_logit <- function(z) {
+  1 / (1 + exp(-z))
+}
+
+n_participants <- 100
+n_items <- 10
+
+# generate parameters
+z_p <- replicate(2, rnorm(n_participants, 0, 1))
+alpha_p <- rnorm(2, c(0, -2), 1)
+tau_p <- rexp(2, 1)
+Rho_p <- rlkjcorr(1, 2, 2)
+L_Rho_p <- chol(Rho_p)
+theta <- t(diag(tau_p) %*% t(L_Rho_p) %*% t(z_p))
+z_i <- replicate(2, rnorm(n_items, 0, 1))
+alpha_i <- rnorm(2, c(0, -2), 1)
+tau_i <- rexp(2, 1)
+Rho_i <- rlkjcorr(1, 2, 2)
+L_Rho_i <- chol(Rho_i)
+delta <- t(diag(tau_i) %*% t(L_Rho_i) %*% t(z_i))
+
+lambda <- rnorm(1, -1, 1)
+sigma <- rexp(2, 1)
+
+# create containers for honest correct responding probability and observed
+# responses
+
+
+pi_C <- matrix(
+  data = NA, 
+  nrow = n_participants, 
+  ncol = n_items
+)
+
+pi_H <- matrix(
+  data = NA, 
+  nrow = n_participants, 
+  ncol = n_items
+)
+
+y <- matrix(
+  data = NA, 
+  nrow = n_participants, 
+  ncol = n_items,
+  dimnames = list(
+    participant = 1:n_participants,
+    item = 1:n_items)
+)
+
+rt <- matrix(
+  data = NA, 
+  nrow = n_participants, 
+  ncol = n_items,
+  dimnames = list(
+    participant = 1:n_participants,
+    item = 1:n_items)
+)
+
+cheater <- matrix(
+  data = NA, 
+  nrow = n_participants, 
+  ncol = n_items,
+  dimnames = list(
+    participant = 1:n_participants,
+    item = 1:n_items)
+)
+
+# iterate through each person answering each item, calculate the probability of
+# correct honest responding and generate an observed response
+for (p in 1:n_participants) {
+  for (i in 1:n_items) {
+    pi_C[p,i] <- inv_logit(alpha[2] + theta[p,2])
+    pi_H[p,i] <- inverse_logit(alpha[1] + theta[p,1] - delta[i,1])
+    cheater[p,i] <- rbinom(1, 1, pi_C[p,i])
+    y[p,i] <- ifelse(cheater[p,i] == 1, 1,rbinom(n = 1, size = 1, prob = pi_H[p,i]))
+  
+    rt[p,i] <- ifelse(cheater[p,i] == 1, 
+                      rlnorm(n = 1, lambda, sigma[2]),
+                      rlnorm(n = 1, delta[i,2] - (alpha[1] + theta[p,1]), sigma[2]))
+  }
+}
+
+# convert y to long format
+y_long <- reshape2::melt(y, value.name = "response")
+rt_long <- reshape2::melt(rt, value.name = "time")
+df_long <- merge(y_long, rt_long, by = c("participant", "item"))
+```
+
+
+We can then estimate this model to see if we can recover the parameters. Quadratic approximation will likely perform poorly, so we're going to use the `ulam` function, which estimates parameters via MCMC.
+
+```{r message=FALSE, cache=TRUE, include=FALSE}
+library(rethinking)
+
+flist_2 <- alist(
+  response ~ dbern(pi_H + pi_C),
+  time ~ dlnorm(rt_mu, rt_s),
+  pi_H <- (1 - pi_C) * inv_logit(alpha[1] + theta[participant,1] - delta[item,1]),
+  pi_C <- inv_logit(alpha[2] + theta[participant, 2]),
+  rt_mu <- pi_C * lambda + (1 - pi_C) * (delta[item,2] - alpha[1] + theta[participant,1]),
+  transpars> vector[participant]:rt_s <- pi_C * sigma[2] + (1 - pi_C) * sigma[1],
+  
+  # calculate person ability
+  # theta[,1] = verbal ability
+  # theta[,2] = tendency to cheat or something like that
+  transpars> matrix[participant,2]:theta <- compose_noncentered( tau_p , L_Rho_p , z_p ),
+  matrix[2,participant]:z_p ~ normal(0, 1),
+  vector[2]:alpha_p ~ normal(0, 1),
+  vector[2]:tau_p ~ dexp(1),
+  cholesky_factor_corr[2]:L_Rho_p ~ lkj_corr_cholesky( 2 ),
+  
+  transpars> matrix[item,2]:delta <- compose_noncentered( tau_i , L_Rho_i , z_i ),
+  matrix[2,item]:z_i ~ normal(0, 1),
+  vector[2]:alpha_i ~ normal(0, 1),
+  vector[2]:tau_i ~ dexp(1),
+  cholesky_factor_corr[2]:L_Rho_i ~ lkj_corr_cholesky( 2 ),
+  
+  # item difficulty
+  lambda ~ dlnorm(0, 1),
+  vector[2]:sigma ~ dexp(1),
+  
+  gq> matrix[2,2]:Rho_p <<- Chol_to_Corr(L_Rho_p),
+  gq> matrix[2,2]:Rho_i <<- Chol_to_Corr(L_Rho_i)
+  
+)
+
+fit_2 <- ulam(
+  flist = flist_2,
+  data = as.list(df_long), 
+  chains = 2, 
+  cmdstan = T,
+  #threads = 2,
+  cores = 4,
+  messages = TRUE
+)  
+  
+```
+
+
+```{r}
+post_2 <- extract.samples(fit_2)
+```
+
+```{r}
+with(post_2, dens(pi_C, show.HPDI = T))
+
+with(post_2, dens(alpha[,1], show.HPDI = T))
+with(post_2, dens(alpha[,2],add = T, show.HPDI = T))
+abline(v = alpha, lty = 2)
+
+with(post_2, dens(tau[,1], show.HPDI = T))
+with(post_2, dens(tau[,2], add = T, show.HPDI = T))
+abline(v = tau, lty = 2)
+```
+
+```{r}
+
+z_mu <- t(apply(post_2$z, c(2,3), mean))
+z_1 <- t(apply(post_2$z[,1,], 2, PI))
+z_2 <- t(apply(post_2$z[,2,], 2, PI))
+n_th <- 100
+idx <- sample(1:n_participants, n_th)
+idx <- idx[order(z[idx,1])]
+plot(
+  x = z[idx,1], y = z[idx,1],
+  ylab = bquote(~z),
+  xlab = "",
+  pch = 16,
+  ylim = c(-6, 6),
+  frame.plot = F,
+  xaxt = "n"
+)
+points(
+  x = z[idx,1], y = z_mu[idx,1]
+)
+segments(
+  x0 = z[idx,1], x1 = z[idx,1],
+  y0 = z_1[idx, 1],
+  y1 = z_1[idx, 2],
+  lwd = .4
+)
+
+idx <- idx[order(z[idx,2])]
+plot(
+  x = z[idx,2], y = z[idx,2],
+  ylab = bquote(~z),
+  xlab = "",
+  pch = 16,
+  ylim = c(-8, 8),
+  frame.plot = F,
+  xaxt = "n"
+)
+points(
+  x = z[idx,2], y = z_mu[idx,2]
+)
+segments(
+  x0 = z[idx,2], x1 = z[idx,2],
+  y0 = z_2[idx, 1],
+  y1 = z_2[idx, 2],
+  lwd = .4
+)
+```
+
+
+```{r}
+delta_mu <- apply(post_2$delta, 2, mean)
+delta_ci <- t(apply(post_2$delta, 2, PI))
+n_b <- 10
+idx <- sample(1:n_items, n_b)
+idx <- idx[order(delta[idx])]
+plot(
+  x = delta[idx], y = delta[idx],
+  ylab = bquote(~delta),
+  xlab = "",
+  pch = 16,
+  ylim = c(-3, 3),
+  frame.plot = F,
+  xaxt = "n"
+)
+points(
+  x = delta[idx], y = delta_mu[idx]
+)
+segments(
+  x0 = delta[idx], x1 = delta[idx],
+  y0 = delta_ci[idx, 1],
+  y1 = delta_ci[idx, 2],
+  lwd = .4
+)
+```
